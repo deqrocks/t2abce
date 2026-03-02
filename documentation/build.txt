@@ -1,0 +1,28 @@
+# apple-bce build + deploy (run from anywhere)
+ROOT=/home/andre/Develop/apple-bce-fix/apple-bce
+KVER=$(uname -r)
+DST=/lib/modules/$KVER/updates/apple-bce/apple-bce.ko
+BK=/lib/modules/$KVER/backup-local/apple-bce
+TS=$(date +%Y%m%d-%H%M%S)
+
+modinfo "$DST" 2>/dev/null | rg 'version|srcversion' || true
+
+make -C "$ROOT" -j"$(nproc)"
+
+sudo install -d "$BK"
+if [ -e "$DST" ]; then
+  sudo install -Dm0644 "$DST" "$BK/apple-bce.$TS.ko"
+fi
+sudo install -Dm0644 "$ROOT/apple-bce.ko" "$DST"
+sudo depmod -a "$KVER"
+sudo dracut -f --kver "$KVER"
+
+sudo rmmod -f apple_bce || true
+sudo insmod "$DST" || true
+sudo modprobe apple_bce
+
+sleep 2
+cat /sys/class/leds/:white:kbd_backlight/{brightness,max_brightness}
+echo 255 | sudo tee /sys/class/leds/:white:kbd_backlight/brightness
+
+modinfo "$DST" | rg 'version|srcversion'

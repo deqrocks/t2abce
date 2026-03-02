@@ -1,0 +1,28 @@
+# PM ordering test for apple-bce suspend/resume
+# Goal: isolate async PM race vs BCE/VHCI command-path issue
+
+# 1) Enable pm_async=0 (Fedora-safe: avoid nested --default-kernel substitution)
+sudo grubby --update-kernel=ALL --args="pm_async=0"
+
+# 2) Reboot
+sudo systemctl reboot
+
+# 3) Verify after boot
+cat /proc/cmdline | tr ' ' '\n' | rg '^pm_async='
+
+# 4) Run your normal suspend/resume reproduction once
+# (power-button path, as usual)
+
+# 5) After reboot (if crash) collect logs from previous boot
+mkdir -p ~/apple-bce-logs
+journalctl -b -1 -k -o short-monotonic > ~/apple-bce-logs/pm_async0_boot_full.log
+journalctl -b -1 -k -o short-monotonic | rg -n "apple-bce|bce_vhci|bce-vhci|aaudio|hci_bcm4377|PM: suspend|PM: Waking up|resume port|timed out|desync|HC died|usb usb5|RTI status invalid" > ~/apple-bce-logs/pm_async0_focus.log
+
+# 6) Optional: capture current boot too
+journalctl -b -k -o short-monotonic > ~/apple-bce-logs/current_boot_full.log
+
+# 7) Restore default async behavior after test
+sudo grubby --update-kernel=ALL --remove-args="pm_async=0"
+
+# 8) Reboot again
+sudo systemctl reboot

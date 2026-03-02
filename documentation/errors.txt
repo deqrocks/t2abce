@@ -1,0 +1,193 @@
+apple-bce obvious errors (fresh upstream snapshot)
+Date: 2026-02-23
+
+Project context
+- This repository is the result of multiple iterations/branches over roughly three weeks of intensive work (~112 hours).
+- Final test platform for most runs was a MacBook Air 2020 (T2) with a Checkm8-based BridgeOS modification.
+- Root cause attribution to Checkm8 is not proven; hardware generation effects are also possible (late T2-era platform characteristics, e.g. BCM4377/1030NG7 environment).
+- Project intent: share objective fixes, diagnostics, and lessons learned so others can reuse the code and improve results on different hardware.
+- Important limitation: a full successful end-to-end validation on a suitable unmodified reference device was not possible in this effort.
+- Practical expectation: the driver changes are intended to be generally useful and should work, but universal runtime behavior across all T2 models remains unverified.
+
+Scope
+- This file lists only clear, objective code defects.
+- No speculative root-cause claims for suspend/resume are included.
+
+1) Wrong error pointer source after device_create failure
+- File: apple_bce.c:52
+- Code uses PTR_ERR(bce_class) instead of PTR_ERR(bce->dev).
+- Impact: wrong error code propagation and misleading failure handling.
+
+2) Return value of bce_vhci_create is ignored
+- File: apple_bce.c:104
+- bce_vhci_create(...) is called without checking status.
+- Impact: probe can continue as success even if VHCI setup failed.
+
+3) Missing NULL check for pci_get_slot result
+- File: apple_bce.c:82, apple_bce.c:84, apple_bce.c:89
+- bce->pci0 is dereferenced without verifying pci_get_slot(...) success.
+- Impact: NULL dereference on error path.
+
+4) bce_alloc_cq dereferences q before NULL check
+- File: queue.c:10-15
+- q is used immediately after kzalloc without checking allocation result.
+- Impact: OOM can trigger NULL dereference.
+
+5) bce_alloc_sq dereferences q before NULL check
+- File: queue.c:104-115
+- q is used immediately after kzalloc without checking allocation result.
+- Impact: OOM can trigger NULL dereference.
+
+6) bce_alloc_sq does not validate completion_data allocation
+- File: queue.c:113-123
+- q->completion_data is allocated but never checked for NULL.
+- Impact: later completion paths can dereference NULL.
+
+7) bce_free_sq leaks completion_data
+- File: queue.c:136-140
+- completion_data is allocated but never freed in bce_free_sq.
+- Impact: memory leak.
+
+8) bce_alloc_cmdq dereferences q before NULL check
+- File: queue.c:196-197
+- q is used immediately after kzalloc without checking allocation result.
+- Impact: OOM can trigger NULL dereference.
+
+9) bce_alloc_cmdq leaks q->sq when tres allocation fails
+- File: queue.c:203-207
+- On q->tres allocation failure, q is freed but q->sq is not.
+- Impact: memory leak.
+
+10) QID leak when queue allocation fails after ida allocation
+- File: queue.c:330-332, queue.c:367-369
+- On bce_alloc_cq/bce_alloc_sq failure, allocated IDA slot is not released.
+- Impact: ID exhaustion over repeated failures.
+
+11) Stale queue pointer after freeing command queues
+- File: apple_bce.c:177-183
+- bce_free_command_queues clears queues[0] but not queues[1].
+- Impact: stale pointer left in queue table.
+
+12) Missing NULL check for vdev before dereference
+- File: vhci/vhci.c:248-254
+- vdev is allocated but used without checking kzalloc result.
+- Impact: OOM can trigger NULL dereference.
+
+13) Workqueue allocation not checked
+- File: vhci/vhci.c:41
+- alloc_ordered_workqueue(...) return value is not validated.
+- Impact: later queue_work on NULL workqueue pointer can crash.
+
+14) Missing workqueue and HCD lifetime cleanup
+- File: vhci/vhci.c:73-79
+- destroy path removes HCD but does not usb_put_hcd(...).
+- workqueue is never destroyed/cancelled.
+- Impact: refcount leak and possible use-after-free/race with pending work.
+
+15) HCD put missing on create failure path
+- File: vhci/vhci.c:61-64
+- On fail_hcd path, event/message queues are destroyed but created HCD is not put.
+- Impact: resource leak.
+
+16) Sleeping allocation under spinlock in transfer queue path
+- File: vhci/transfer.c:68-75, vhci/transfer.c:132
+- kmalloc(..., GFP_KERNEL) is called in code reached while urb_lock is held.
+- Impact: invalid sleep-in-atomic context risk.
+
+17) No NULL check after kmalloc for deferred event node
+- File: vhci/transfer.c:71-74
+- kmalloc result is used immediately (INIT_LIST_HEAD/lm->msg) without check.
+- Impact: NULL dereference on OOM.
+
+18) Segment list builder does not advance element pointer
+- File: queue_dma.c:123-156
+- Inside for_each_sg loop, el is never incremented.
+- Impact: segment descriptors overwrite the same slot; corrupted segment list.
+
+19) Segment-list pages allocated by __get_free_page are never freed
+- File: queue_dma.c:126, queue_dma.c:180-188
+- page_start pages are allocated, but unmap path only kfree(list) metadata.
+- Impact: memory leak.
+
+20) Return value of port-resume command is ignored
+- File: vhci/vhci.c:409
+- bce_vhci_cmd_port_resume(&vhci->cq, i) is called without checking status.
+- Impact: command failures in port-resume path are silently ignored; resume
+  continues with inconsistent state and the first failing port is not visible.
+
+21) Missing bounds check for parsed AAudio reply tag index
+- File: audio/protocol_bce.c:134
+- Parsed tag number `tagn` is used as array index into
+  `pending_entries[tagn]` without validating `0 <= tagn < AAUDIO_BCE_QUEUE_TAG_COUNT`.
+- Impact: out-of-bounds read/write risk if an unexpected/corrupted tag is received;
+  can corrupt memory and destabilize suspend/resume paths.
+- Clarification:
+  - This is a safety/integrity bug and should be fixed regardless of PM behavior.
+  - A triggered "tag out of range" indicates broken input invariants
+    (stale/corrupted/desynced reply path),
+    not a normal tag generated by this driver.
+  - This is distinct from:
+    `aaudio_handle_reply: No queued item found for tag`
+    where the tag can still be syntactically valid but no pending entry exists.
+
+22) Return value of port-suspend command is ignored
+- File: vhci/vhci.c:373 (upstream snapshot)
+- `bce_vhci_cmd_port_suspend(&vhci->cq, i)` is called without checking status.
+- Impact: suspend can continue with a partially suspended port set; resume then
+  runs against inconsistent controller/port state.
+
+23) Command-reply correlation is based on `cmd` only (missing `param1` validation)
+- File: vhci/queue.c:257-265 (upstream snapshot)
+- The command queue accepts a reply when `(res->cmd & ~0x8000) == req->cmd`, but
+  does not validate `param1` (port/device selector) or any request ID.
+- Impact:
+  - For repeated same-command traffic (notably `PORT_STATUS` / `0x16`), a late
+    reply for one port can be accepted as the reply for a different in-flight
+    request on the same queue.
+  - This can corrupt request/response ordering and amplify timeout/cancel desync
+    behavior during suspend/resume recovery.
+
+24) Command helpers send uninitialized fields to firmware
+- File: vhci/command.h:52-202
+- Command helper functions build `struct bce_vhci_message cmd, res;` and often
+  initialize only a subset of fields (e.g. `cmd.cmd`, sometimes `cmd.param1`),
+  leaving other fields as stack garbage.
+- Impact:
+  - nondeterministic wire data (especially `param2`) is sent to T2 for commands
+    where these fields are not explicitly set;
+  - behavior can vary per boot/timing and can shift resume failure points across
+    ports.
+- Provenance:
+  - upstream-origin issue (present in original 2019 VHCI command helper commits,
+    not introduced by local changes).
+
+25) Resume-endpoint loop dereferences device pointers without validating device mapping
+- File: vhci/vhci.c (resume endpoint loop in `bce_vhci_bus_resume`)
+- The loop directly dereferences
+  `vhci->devices[vhci->port_to_device[i]]->...` without checking that:
+  - the port index is within active `port_count`,
+  - the mapped `devid` is within array bounds,
+  - `vhci->devices[devid]` is non-NULL.
+- Impact:
+  - stale/inconsistent mapping can trigger invalid dereference in resume-endpoint
+    phase and cause hard reset/crash behavior exactly where endpoint resume runs.
+
+Current port-level findings
+- With per-port resume logging, crash point is reproducible at:
+  `bce_vhci: resume port 6 begin (...)`
+- `missing tag` is not present in this run class after unbinding `aaudio`, while
+  the hard reset at resume-port stage remains.
+- This narrows the remaining blocker to VHCI port-resume path (port-specific),
+  not to the AAudio `missing tag` path.
+
+Diagnostic note: why suspend/resume currently works only with rmmod -f + modprobe
+- No single “obvious bug” above can be proven as the direct root cause for this behavior.
+- The hard difference is lifecycle coverage:
+  - PM path uses apple_bce_suspend()/apple_bce_resume() only.
+  - rmmod/modprobe forces full remove/probe lifecycle.
+- Full remove/probe performs additional state transitions not covered by the current PM callbacks:
+  - teardown/recreate of VHCI/HCD objects,
+  - full queue teardown/re-registration,
+  - IRQ/vector/device re-init path,
+  - full firmware handshake path during probe.
+- Therefore, current evidence points to a lifecycle mismatch (PM vs remove/probe), not to one specific obvious code defect from the list.

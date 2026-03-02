@@ -1,0 +1,33 @@
+# Build from running fc42, target/deploy for fc43.
+# No modprobe here (safe while booted into fc42).
+
+set -euo pipefail
+
+SRC=/home/andre/Develop/apple-bce-fix/apple-bce
+KVER=6.18.7-210.t2.fc43.x86_64
+KDIR=/usr/src/kernels/${KVER}
+MODDST=/lib/modules/${KVER}/updates/apple-bce
+MODPATH=${MODDST}/apple-bce.ko
+STAMP=$(date +%Y%m%d-%H%M%S)
+
+cd "${SRC}"
+
+# 1) Build module for fc43
+make -C "${KDIR}" M="${SRC}" modules
+
+# 2) Backup currently installed fc43 module (if present)
+sudo install -d "${MODDST}"
+if [ -f "${MODPATH}" ]; then
+  sudo install -Dm0644 "${MODPATH}" "/lib/modules/${KVER}/backup-local/apple-bce/apple-bce.${STAMP}.ko"
+fi
+
+# 3) Install new module into fc43 updates path
+sudo install -Dm0644 "${SRC}/apple-bce.ko" "${MODPATH}"
+
+# 4) Refresh module deps + rebuild fc43 initramfs
+sudo depmod -a "${KVER}"
+sudo dracut -f --kver "${KVER}"
+
+# 5) Verify on-disk target artifact + initramfs payload
+modinfo "${MODPATH}" | rg "filename|vermagic|srcversion"
+sudo lsinitrd "/boot/initramfs-${KVER}.img" | rg -n "updates/apple-bce/apple-bce\\.ko|rd\\.driver\\.pre=apple_bce"

@@ -1,0 +1,28 @@
+# Permanently remove custom WiFi sleep hooks that unload/reload brcmfmac.
+# Goal: no more pre-suspend unload/reload side effects from local systemd units.
+
+# 1) Stop + disable services
+sudo systemctl disable --now suspend-wifi-unload.service resume-wifi-reload.service
+
+# 2) Delete local unit files
+sudo rm -f /etc/systemd/system/suspend-wifi-unload.service
+sudo rm -f /etc/systemd/system/resume-wifi-reload.service
+
+# 3) Remove leftover wants symlinks (if any)
+sudo find /etc/systemd/system -type l \
+  \( -name 'suspend-wifi-unload.service' -o -name 'resume-wifi-reload.service' \) \
+  -delete
+
+# 4) Optional: inspect system-sleep hooks that might still touch wifi/brcmfmac
+sudo find /etc/systemd/system-sleep /usr/lib/systemd/system-sleep 2>/dev/null | rg -n "wifi|brcmf|suspend|resume"
+
+# If custom hooks show up there, remove only your custom files explicitly.
+# Example:
+# sudo rm -f /etc/systemd/system-sleep/<your-hook>
+
+# 5) Reload systemd and verify removal
+sudo systemctl daemon-reload
+systemctl list-unit-files | rg -n "suspend-wifi-unload|resume-wifi-reload"
+
+# 6) Reboot before retest
+sudo reboot

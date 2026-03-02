@@ -1,0 +1,153 @@
+Date: 2026-02-23
+
+- Current technical conclusions from this effort:
+  - The original assumption that upstream ring head/tail state handling is fundamentally broken is not supported by current evidence.
+  - The ring implementation appears broadly coherent; several bad practices/objective bugs still existed and were fixed.
+  - Multiple observed crashes during BCE resume are likely amplified by external async drivers (not VHCI path), especially BCM4377/BRCMFMAC behavior that can destabilize the kernel during the same time window.
+  - AAudio also contributed to instability in earlier runs; current safety fixes reduced that failure class, but cannot yet be claimed as a universal root-cause fix.
+- Operational interpretation:
+  - BCE/VHCI logs in the failing runs are often timing markers of where the system is when failure happens, not definitive proof that BCE logic alone is the primary origin of every reset.
+  - Test platform limitation:
+  - This MacBook runs a Checkm8-based BridgeOS modification (used to bypass an iCloud lock).
+  - The exact BridgeOS changes are unknown and not verifiable with current means.
+  - Therefore, suspend/resume findings on this device cannot be treated as fully representative for unmodified T2 MacBook Air/Pro systems.
+
+
+1) Error #18 from errors.txt
+- File: queue_dma.c
+- Function: bce_map_segment_list(...)
+- Finding:
+  The scatter-gather descriptor pointer (`el`) was never advanced inside the
+  `for_each_sg(...)` loop. This caused repeated overwrite of the same segment
+  entry instead of building a valid descriptor list.
+- This is a direct data-path corruption bug in DMA segment list construction.
+  Corrupt segment descriptors can break queue/DMA behavior and are consistent
+  with severe runtime instability.
+- Fix implemented:
+  After writing one SG element (`el->addr`, `el->length`), increment `el` so
+  each SG entry is stored in the next descriptor slot.
+
+Validation result (after fix #18)
+- Evidence source: console photo `documentation/images/51.jpg`.
+- Observed behavior:
+  - Suspend path completes and reaches deep sleep entry (S3) successfully.
+  - Resume progresses through early stages and reaches BCE/VHCI resume.
+  - Last visible BCE/VHCI line before failure is:
+    `bce_vhci: resume ports`
+  - System then hard-resets during/after port resume.
+- Current conclusion:
+  - Fix #18 appears to resolve the suspend-entry part.
+  - Remaining blocker is in the port-resume phase and will be the next target.
+
+Historical hypothesis and update
+- Historical hypothesis:
+  - Missing OUT-drain before endpoint pause could cause suspend/resume mismatch.
+- Implemented:
+  - Explicit OUT-drain in `bce_vhci_transfer_queue_do_pause`.
+- Validation:
+  - Old warning `Not implemented: wait for pending output requests` is gone.
+  - New logs confirm active drain path:
+    `pause: draining pending OUT requests ...` and
+    `pause: OUT drain complete ...`.
+- Updated conclusion:
+  - This removed one clear weakness but did not eliminate the resume reset.
+
+2) Error #21 from errors.txt
+- File: audio/protocol_bce.c
+- Fix implemented:
+  Added bounds validation for parsed reply tag index before accessing
+  `pending_entries[tagn]`.
+- Why this fix is important:
+  Prevents out-of-bounds array access on malformed/unexpected tags.
+- Diagnostic clarification:
+  This is a safety fix, not sufficient proof of the resume reset root cause.
+  The message
+  `aaudio_handle_reply: No queued item found for tag`
+  is a different failure class: the tag may be valid, but no pending entry exists.
+
+3) Error #20 from errors.txt
+- File: vhci/vhci.c
+- Fix implemented:
+  `bce_vhci_bus_resume()` now checks return value of
+  `bce_vhci_cmd_port_resume(...)`, logs the failing port, and aborts resume on error.
+
+4) Error #22 from errors.txt
+- File: vhci/vhci.c
+- Fix implemented:
+  `bce_vhci_bus_suspend()` now checks return value of
+  `bce_vhci_cmd_port_suspend(...)`, logs the failing port, and aborts suspend on error.
+
+Current diagnostic status (latest)
+- `aaudio` unbound test:
+  `missing tag` no longer observed in this test class.
+- Despite that, system still hard-resets in VHCI resume path.
+- With per-port instrumentation, reset reproduces at:
+  `bce_vhci: resume port 6 begin (...)`.
+- Updated conclusion:
+  - AAudio `missing tag` is a separate issue path.
+  - Remaining blocker is in VHCI port-resume sequence (port-specific, port 6 in current runs).
+
+7) BCE function-0 lifetime and resume readiness checks
+- Files: `apple_bce.c`, `apple_bce.h`
+- Fix implemented:
+  - Added NULL check for `pci_get_slot(...)` result (`bce->pci0`).
+  - Added and cleaned up `bce->pci0_link` in probe/remove.
+  - On resume, poll config-space vendor ID before touching MMIO/restore path.
+- Why this is an objective fix:
+  These are direct correctness/safety checks around pointer validity, PM link
+  lifetime, and post-S3 device accessibility.
+
+8) VHCI endpoint/queue lifetime safety fixes
+- File: `vhci/vhci.c`
+- Fix implemented:
+  - `GetPortStatus` now validates `wIndex` bounds (`1..port_count`).
+  - `urb_dequeue` returns `-ENOENT` if `hcpriv` is already NULL.
+  - `drop_endpoint` validates device existence before dereference.
+  - Endpoint destroy paths clear `endp->hcpriv` and reset `tq_mask` state.
+- Why this is an objective fix:
+  Prevents stale-pointer and invalid-dereference behavior during teardown/reset.
+
+9) OUT-queue drain implementation completed
+- Files: `vhci/transfer.c`, `vhci/transfer.h`
+- Fix implemented:
+  - Added explicit OUT pending tracking (`sq_out_pending`).
+  - Added wait queue drain on pause with timeout and explicit logs.
+  - Skip transfer events on inactive queues during teardown.
+- Why this is an objective fix:
+  Replaces a known TODO path ("wait for pending output requests") with concrete
+  synchronization logic.
+
+10) Diagnostic instrumentation added for command/system-event desync
+- Files: `vhci/queue.c`, `vhci/queue.h`, `vhci/vhci.c`, `vhci/vhci.h`
+- Implemented:
+  - Added recent system-event ring buffer and timeout dump.
+  - Extended timeout/mismatch logs with req/res command and params.
+  - Added warning for late/unexpected completions.
+- Classification:
+  Diagnostic support only (not counted as a functional root fix).
+
+11) Additional VHCI consistency fixes in control and teardown paths
+- File: `vhci/vhci.c`
+- Fix implemented:
+  - Initialize `port_change_pending` on controller start.
+  - Ensure endpoint teardown uses the endpoint address field consistently.
+  - Clear endpoint `hcpriv` pointers during destroy/reset transitions.
+  - Rebind `hcpriv` after transfer-queue recreation in reset path.
+  - Normalize endpoint-drop handling for missing/invalid device state.
+- Why this is an objective fix:
+  These are concrete state-consistency corrections that reduce stale-pointer and
+  stale-state behavior during reset/suspend/resume transitions.
+
+12) Error #25 from errors.txt
+- File: `vhci/vhci.c`
+- Fix implemented:
+  Hardened the resume-endpoint loop in `bce_vhci_bus_resume()`:
+  - iterate only active ports (`1..port_count`);
+  - read mapped `devid` once and validate bounds before dereference;
+  - validate `vhci->devices[devid]` is non-NULL before using `tq_mask`/queues.
+- Why this is an objective fix:
+  Removes unchecked pointer/index dereference in a critical PM path and turns
+  stale mapping cases into explicit log+skip behavior instead of hard crash.
+- Scope note:
+  This is a correctness/safety hardening fix; it may reduce crash vectors but is
+  not yet proof of the primary root cause on its own.

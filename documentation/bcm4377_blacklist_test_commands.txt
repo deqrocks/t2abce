@@ -1,0 +1,24 @@
+# Test: isolate BCM4377 impact on suspend/resume
+# Keep pm_async=0 as currently configured.
+
+# 1) Add blacklist for hci_bcm4377 to all Fedora kernel entries
+sudo grubby --update-kernel=ALL --args="modprobe.blacklist=hci_bcm4377"
+
+# 2) Reboot
+sudo systemctl reboot
+
+# 3) Verify after boot
+cat /proc/cmdline | tr ' ' '\n' | rg '^(pm_async=0|modprobe.blacklist=)'
+lsmod | rg '^hci_bcm4377' || echo "hci_bcm4377 not loaded"
+
+# 4) Run one suspend/resume reproduction
+
+# 5) Collect focused previous-boot logs
+mkdir -p ~/apple-bce-logs
+journalctl -b -1 -k -o short-monotonic | rg -n "PM: Waking up|bce_vhci|bce-vhci|aaudio|hci_bcm4377|HC died|timed out|desync|resume reinit failed|failed to resume async" > ~/apple-bce-logs/bcm4377_blacklist_focus.log
+
+# 6) Remove blacklist (rollback)
+sudo grubby --update-kernel=ALL --remove-args="modprobe.blacklist=hci_bcm4377"
+
+# 7) Reboot
+sudo systemctl reboot

@@ -1,0 +1,22 @@
+# Remove hibernate resume kernel args from all Fedora kernel entries.
+# This removes both:
+#   - resume=...
+#   - resume_offset=...
+
+# 1) Remove the currently active resume args (if present)
+args_to_remove="$(cat /proc/cmdline | tr ' ' '\n' | rg '^(resume=|resume_offset=)' | tr '\n' ' ')"
+if [[ -n "${args_to_remove// }" ]]; then
+  echo "Removing args: $args_to_remove"
+  sudo grubby --update-kernel=ALL --remove-args="$args_to_remove"
+else
+  echo "No resume/resume_offset args found in current cmdline."
+fi
+
+# 2) Extra safety: remove the known offset explicitly
+sudo grubby --update-kernel=ALL --remove-args="resume_offset=14689536"
+
+# 3) Reboot
+sudo reboot
+
+# 4) Verify after reboot
+cat /proc/cmdline | tr ' ' '\n' | rg '^(resume=|resume_offset=)' || echo "OK: no resume args"

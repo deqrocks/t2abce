@@ -1,0 +1,31 @@
+# Build and install apple-bce for fc43 while running fc42
+# Safe: no modprobe, no runtime module reload on the current boot.
+
+set -euo pipefail
+
+SRC=/home/andre/Develop/apple-bce-fix/apple-bce
+KVER=6.18.7-210.t2.fc43.x86_64
+KDIR=/usr/src/kernels/$KVER
+OUT=/lib/modules/$KVER/updates/apple-bce
+
+cd "$SRC"
+
+# 1) Build module against fc43 headers
+make -C "$KDIR" M="$PWD" modules
+
+# 2) Install into fc43 updates path
+sudo install -d "$OUT"
+sudo install -m 0644 "$SRC/apple-bce.ko" "$OUT/apple-bce.ko"
+
+# 3) Refresh fc43 module deps
+sudo depmod -a "$KVER"
+
+# 4) Verify target artifact and module source version
+modinfo "$OUT/apple-bce.ko" | rg "filename|srcversion|vermagic"
+
+# 5) Optional: verify that fc43 will resolve to updates module
+modprobe -D -S "$KVER" apple_bce | sed -n '1,20p'
+
+sudo dracut -f --kver 6.18.7-210.t2.fc43.x86_64
+sudo lsinitrd /boot/initramfs-6.18.7-210.t2.fc43.x86_64.img | rg -n "updates/apple-bce/apple-bce\\.ko|rd\\.driver\\.pre=apple_bce"
+
