@@ -34,6 +34,7 @@ int bce_mailbox_send(struct bce_mailbox *mb, u64 msg, u64* recv)
 
     wait_for_completion_timeout(&mb->mb_completion, msecs_to_jiffies(BCE_MBOX_TIMEOUT_MS));
     if (atomic_read(&mb->mb_status) != 2) { // Didn't get the reply
+        pr_err("apple-bce: mailbox send timed out (msg=0x%llx)\n", msg);
         atomic_set(&mb->mb_status, 0);
         return -ETIMEDOUT;
     }
