@@ -772,14 +772,15 @@ static void bce_vhci_handle_system_event(struct bce_vhci_event_queue *q, struct 
          * tell the USB framework to re-scan so late-initializing devices
          * (camera, Touch Bar, iBridge) are discovered. */
         if (hcd) {
-            pr_warn("bce-vhci: Port %u status change event, requesting hub rescan\n",
-                                msg->param1);
-            set_bit(msg->param1, &q->vhci->port_change_pending);
-            usb_hcd_poll_rh_status(hcd);
             if (q->vhci->system_resume_active) {
                 q->vhci->system_resume_active = false;
-                pr_info("bce-vhci: system resume window closed (port %u status change)\n",
+                pr_info("bce-vhci: system resume window closed (port %u status change); hub rescan skipped\n",
                         msg->param1);
+            } else {
+                pr_warn("bce-vhci: Port %u status change event, requesting hub rescan\n",
+                                    msg->param1);
+                set_bit(msg->param1, &q->vhci->port_change_pending);
+                usb_hcd_poll_rh_status(hcd);
             }
         } else {
             pr_warn("bce-vhci: port %u change received but HCD is NULL\n",
