@@ -16,7 +16,9 @@ static irqreturn_t bce_handle_mb_irq(int irq, void *dev);
 static irqreturn_t bce_handle_dma_irq(int irq, void *dev);
 static int bce_fw_version_handshake(struct apple_bce_device *bce);
 static int bce_register_command_queue(struct apple_bce_device *bce, struct bce_queue_memcfg *cfg, int is_sq);
-static void bce_wait_for_pcie_link(struct apple_bce_device *bce);
+static void bce_disable_pcie_low_power_states(struct apple_bce_device *bce);
+static int bce_retrain_pcie_link(struct apple_bce_device *bce);
+static int bce_wait_for_pcie_link_ready(struct apple_bce_device *bce);
 
 static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
@@ -47,6 +49,9 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     bce->pci = dev;
     pci_set_drvdata(dev, bce);
+
+    bce_disable_pcie_low_power_states(bce);
+
     bce->devt = bce_chrdev;
     bce->dev = device_create(bce_class, &dev->dev, bce->devt, NULL, "apple-bce");
     if (IS_ERR_OR_NULL(bce->dev)) {
@@ -351,27 +356,110 @@ finish_with_state:
     return status;
 }
 
-static void bce_wait_for_pcie_link(struct apple_bce_device *bce)
+static void bce_disable_aspm_l1_for_dev(struct pci_dev *pdev, const char *name)
+{
+    int cap;
+    int l1ss_cap;
+    u16 lnkctl;
+    u32 l1ss_ctl1;
+
+    if (!pdev)
+        return;
+
+    cap = pci_find_capability(pdev, PCI_CAP_ID_EXP);
+    if (cap) {
+        pci_read_config_word(pdev, cap + PCI_EXP_LNKCTL, &lnkctl);
+        if (lnkctl & PCI_EXP_LNKCTL_ASPMC) {
+            lnkctl &= ~PCI_EXP_LNKCTL_ASPMC;
+            pci_write_config_word(pdev, cap + PCI_EXP_LNKCTL, lnkctl);
+            pr_info("apple-bce: pcie: disabled ASPM L1/L0s on %s (%s)\n", name, pci_name(pdev));
+        }
+    }
+
+    l1ss_cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_L1SS);
+    if (l1ss_cap) {
+        pci_read_config_dword(pdev, l1ss_cap + PCI_L1SS_CTL1, &l1ss_ctl1);
+        if (l1ss_ctl1 & PCI_L1SS_CTL1_L1SS_MASK) {
+            l1ss_ctl1 &= ~PCI_L1SS_CTL1_L1SS_MASK;
+            pci_write_config_dword(pdev, l1ss_cap + PCI_L1SS_CTL1, l1ss_ctl1);
+            pr_info("apple-bce: pcie: disabled L1SS on %s (%s)\n", name, pci_name(pdev));
+        }
+    }
+}
+
+static void bce_disable_pcie_low_power_states(struct apple_bce_device *bce)
+{
+    struct pci_dev *up;
+
+    bce_disable_aspm_l1_for_dev(bce->pci, "endpoint");
+
+    up = pci_upstream_bridge(bce->pci);
+    if (up)
+        bce_disable_aspm_l1_for_dev(up, "upstream");
+}
+
+static int bce_retrain_pcie_link(struct apple_bce_device *bce)
+{
+    struct pci_dev *up = pci_upstream_bridge(bce->pci);
+    struct pci_dev *ctrl = up ? up : bce->pci;
+    int cap;
+    u16 lnkctl;
+
+    cap = pci_find_capability(ctrl, PCI_CAP_ID_EXP);
+    if (!cap)
+        return -ENODEV;
+
+    pci_read_config_word(ctrl, cap + PCI_EXP_LNKCTL, &lnkctl);
+    lnkctl |= PCI_EXP_LNKCTL_RL;
+    pci_write_config_word(ctrl, cap + PCI_EXP_LNKCTL, lnkctl);
+    usleep_range(10000, 15000);
+
+    return 0;
+}
+
+static int bce_wait_for_pcie_link_ready(struct apple_bce_device *bce)
 {
     int cap;
     int i;
+    int stable = 0;
+    u16 vid = 0xffff;
     u16 lnksta = 0;
+    u32 lnkcap = 0;
+    bool require_dllla = false;
 
     cap = pci_find_capability(bce->pci, PCI_CAP_ID_EXP);
-    if (!cap) {
-        pr_info("apple-bce: resume: PCIe capability not found, skipping link wait\n");
-        return;
-    }
+    if (!cap)
+        return -ENODEV;
+
+    pci_read_config_dword(bce->pci, cap + PCI_EXP_LNKCAP, &lnkcap);
+    require_dllla = !!(lnkcap & PCI_EXP_LNKCAP_DLLLARC);
 
     for (i = 0; i < 150; i++) {
+        u16 speed;
+        u16 width;
+        bool training;
+        bool dllla_ok;
+
+        pci_read_config_word(bce->pci, PCI_VENDOR_ID, &vid);
         pci_read_config_word(bce->pci, cap + PCI_EXP_LNKSTA, &lnksta);
-        pr_info("apple-bce: resume: link wait %d/150 lnksta=0x%04x\n", i + 1, lnksta);
-        if (lnksta & PCI_EXP_LNKSTA_DLLLA)
-            return;
-        msleep(100);
+
+        speed = lnksta & PCI_EXP_LNKSTA_CLS;
+        width = (lnksta & PCI_EXP_LNKSTA_NLW) >> 4;
+        training = !!(lnksta & PCI_EXP_LNKSTA_LT);
+        dllla_ok = !require_dllla || !!(lnksta & PCI_EXP_LNKSTA_DLLLA);
+
+        if (vid != 0xffff && speed && width && !training && dllla_ok) {
+            if (++stable >= 3)
+                return 0;
+        } else {
+            stable = 0;
+        }
+
+        usleep_range(10000, 15000);
     }
 
-    pr_warn("apple-bce: resume: link not active after 15s (lnksta=0x%04x), continuing\n", lnksta);
+    pr_err("apple-bce: resume: link not ready (vid=0x%04x lnksta=0x%04x)\n", vid, lnksta);
+    return -ETIMEDOUT;
 }
 
 static int apple_bce_suspend(struct device *dev)
@@ -387,11 +475,21 @@ static int apple_bce_resume(struct device *dev)
     struct apple_bce_device *bce = pci_get_drvdata(to_pci_dev(dev));
     int status;
 
+    bce_disable_pcie_low_power_states(bce);
+
     pci_set_master(bce->pci);
     if (bce->pci0)
         pci_set_master(bce->pci0);
 
-    bce_wait_for_pcie_link(bce);
+    status = bce_retrain_pcie_link(bce);
+    if (status) {
+        pr_err("apple-bce: resume: pcie retrain failed (%d)\n", status);
+        return status;
+    }
+
+    status = bce_wait_for_pcie_link_ready(bce);
+    if (status)
+        return status;
 
     if ((status = bce_restore_state_and_wake(bce)))
         return status;
