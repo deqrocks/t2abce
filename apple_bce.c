@@ -298,6 +298,7 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
             bce->saved_data_dma_addr = dma_addr;
             bce->saved_data_dma_ptr = dma_ptr;
             bce->saved_data_dma_size = size;
+            pr_info("apple-bce: suspend outcome: stateful (%zu bytes)\n", size);
             return 0;
         } else if (BCE_MB_TYPE(resp) == BCE_MB_SAVE_STATE_AND_SLEEP_FAILURE) {
             dma_free_coherent(&bce->pci->dev, size, dma_ptr, dma_addr);
@@ -315,8 +316,16 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
     }
     if (dma_ptr)
         dma_free_coherent(&bce->pci->dev, size, dma_ptr, dma_addr);
-    if (!status)
-        return bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_SLEEP_NO_STATE, 0), &resp);
+    if (!status) {
+        pr_warn("apple-bce: suspend outcome: falling back to no-state sleep\n");
+        status = bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_SLEEP_NO_STATE, 0), &resp);
+        if (status)
+            pr_err("apple-bce: suspend failed (sleep no-state mailbox send, status=%d)\n", status);
+        else
+            pr_info("apple-bce: suspend outcome: no-state (resp type=0x%x value=0x%llx)\n",
+                    BCE_MB_TYPE(resp), BCE_MB_VALUE(resp));
+        return status;
+    }
     return status;
 }
 
@@ -420,9 +429,15 @@ static int bce_wait_for_pcie_link_ready(struct apple_bce_device *bce)
 static int apple_bce_suspend(struct device *dev)
 {
     struct apple_bce_device *bce = pci_get_drvdata(to_pci_dev(dev));
+    int status;
 
     bce_timestamp_stop(&bce->timestamp);
-    return bce_save_state_and_sleep(bce);
+    status = bce_save_state_and_sleep(bce);
+    if (status)
+        pr_err("apple-bce: suspend failed (status=%d)\n", status);
+    else
+        pr_info("apple-bce: suspend complete via %s path\n", bce->saved_data_dma_ptr ? "stateful" : "no-state");
+    return status;
 }
 
 static int apple_bce_resume(struct device *dev)
