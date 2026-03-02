@@ -191,3 +191,57 @@ Diagnostic note: why suspend/resume currently works only with rmmod -f + modprob
   - IRQ/vector/device re-init path,
   - full firmware handshake path during probe.
 - Therefore, current evidence points to a lifecycle mismatch (PM vs remove/probe), not to one specific obvious code defect from the list.
+
+Supplemental boot-log triage (2026-03-02)
+- Scope:
+  - The entries below are runtime log observations and risk assessments.
+  - They are not all code defects in this repository.
+
+1) DMAR fault on 73:00.1
+- Log:
+  - `DMAR: [DMA Write NO_PASID] Request device [73:00.1] fault addr 0x0 [fault reason 0x05] PTE Write access is not set`
+  - `DMAR: DRHD: handling fault status reg 2`
+- Assessment:
+  - High diagnostic relevance as a confounder for PM stability.
+  - Device `73:00.1` is Broadcom BCM4377 (`hci_bcm4377`), not `apple-bce` (`74:00.1`).
+  - Treat as separate IOMMU/device issue that can destabilize suspend/resume tests.
+
+2) i915 WARN (`assert_port_valid`)
+- Log:
+  - `------------[ cut here ]------------`
+  - `i915 ... Platform does not support port F`
+  - `WARNING ... assert_port_valid ... [i915]`
+- Assessment:
+  - High relevance for PM test quality (independent graphics-path instability).
+  - Not evidence of an `apple-bce` logic bug, but can poison suspend/resume runs.
+
+3) Thunderbolt/PCIe routing warnings
+- Log:
+  - `thunderbolt ... can't derive routing for PCI INT A`
+  - `thunderbolt ... PCI INT A: not connected`
+  - `thunderbolt ... device links to tunneled native ports are missing!`
+  - Similar `pcieport 00:07.x ... PCI INT A/B: not connected`
+- Assessment:
+  - `INT A/B not connected` is often benign on MSI/PME-capable paths.
+  - `device links ... missing` is medium relevance (can affect PM ordering/dependencies).
+
+4) BridgeOS panic signature
+- Source:
+  - `bridgeospanic.log` (timestamp in payload: `2026-02-28 13:47:42 +0000`)
+- Log highlights:
+  - `Unable to deliver MemWr/MemRd ... [Link up = true] [LTSSM = L1.Idle]`
+  - `PUP PANIC - deserialize: bad header UUID`
+- Assessment:
+  - High relevance to transport integrity hypotheses (PCIe/mailbox path instability).
+  - Correlation is strong in pattern; strict one-to-one temporal causation per Linux run still requires synchronized captures.
+
+5) Informational or low-priority platform warnings
+- Logs:
+  - `applesmc ... hwmon_device_register() is deprecated ...`
+  - `integrity: Reading UEFI Secure Boot Certs is not supported on T2 Macs`
+  - `intel-lpss ... error -ENXIO: IRQ index 0 not found`
+  - `MMIO Stale Data CPU bug present and SMT on, data leak possible`
+  - `DMAR-IR: x2apic is disabled because BIOS sets x2apic opt out bit`
+- Assessment:
+  - Low direct relevance to the BCE suspend bug.
+  - Keep as environment context, not as primary root-cause candidates.

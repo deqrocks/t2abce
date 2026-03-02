@@ -275,7 +275,7 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
 {
     int attempt, status = 0;
     u64 resp;
-    dma_addr_t dma_addr = 0;
+    dma_addr_t dma_addr;
     void *dma_ptr = NULL;
     size_t size = max(PAGE_SIZE, 4096UL);
 
