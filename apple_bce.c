@@ -1,6 +1,7 @@
 #include "apple_bce.h"
 #include <linux/module.h>
 #include <linux/crc32.h>
+#include <linux/delay.h>
 #include "audio/audio.h"
 #include <linux/version.h>
 
@@ -15,6 +16,7 @@ static irqreturn_t bce_handle_mb_irq(int irq, void *dev);
 static irqreturn_t bce_handle_dma_irq(int irq, void *dev);
 static int bce_fw_version_handshake(struct apple_bce_device *bce);
 static int bce_register_command_queue(struct apple_bce_device *bce, struct bce_queue_memcfg *cfg, int is_sq);
+static void bce_wait_for_pcie_link(struct apple_bce_device *bce);
 
 static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
@@ -346,6 +348,29 @@ finish_with_state:
     return status;
 }
 
+static void bce_wait_for_pcie_link(struct apple_bce_device *bce)
+{
+    int cap;
+    int i;
+    u16 lnksta = 0;
+
+    cap = pci_find_capability(bce->pci, PCI_CAP_ID_EXP);
+    if (!cap) {
+        pr_info("apple-bce: resume: PCIe capability not found, skipping link wait\n");
+        return;
+    }
+
+    for (i = 0; i < 150; i++) {
+        pci_read_config_word(bce->pci, cap + PCI_EXP_LNKSTA, &lnksta);
+        pr_info("apple-bce: resume: link wait %d/150 lnksta=0x%04x\n", i + 1, lnksta);
+        if (lnksta & PCI_EXP_LNKSTA_DLLLA)
+            return;
+        msleep(100);
+    }
+
+    pr_warn("apple-bce: resume: link not active after 15s (lnksta=0x%04x), continuing\n", lnksta);
+}
+
 static int apple_bce_suspend(struct device *dev)
 {
     struct apple_bce_device *bce = pci_get_drvdata(to_pci_dev(dev));
@@ -362,6 +387,8 @@ static int apple_bce_resume(struct device *dev)
     pci_set_master(bce->pci);
     if (bce->pci0)
         pci_set_master(bce->pci0);
+
+    bce_wait_for_pcie_link(bce);
 
     if ((status = bce_restore_state_and_wake(bce)))
         return status;
