@@ -273,7 +273,7 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
 {
     int attempt, status = 0;
     u64 resp;
-    dma_addr_t dma_addr;
+    dma_addr_t dma_addr = 0;
     void *dma_ptr = NULL;
     size_t size = max(PAGE_SIZE, 4096UL);
 
@@ -282,6 +282,7 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
         dma_ptr = dma_alloc_coherent(&bce->pci->dev, size, &dma_addr, GFP_KERNEL);
         if (!dma_ptr) {
             pr_err("apple-bce: suspend failed (data alloc failed)\n");
+            status = -ENOMEM;
             break;
         }
         BUG_ON((dma_addr % 4096) != 0);
@@ -298,6 +299,8 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
             return 0;
         } else if (BCE_MB_TYPE(resp) == BCE_MB_SAVE_STATE_AND_SLEEP_FAILURE) {
             dma_free_coherent(&bce->pci->dev, size, dma_ptr, dma_addr);
+            dma_ptr = NULL;
+            dma_addr = 0;
             /* The 0x10ff magic value was extracted from Apple's driver */
             size = (BCE_MB_VALUE(resp) + 0x10ff) & ~(4096LLU - 1);
             pr_debug("apple-bce: suspend: device requested a larger buffer (%li)\n", size);

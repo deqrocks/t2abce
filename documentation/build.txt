@@ -1,4 +1,4 @@
-# apple-bce build + deploy (run from anywhere)
+# apple-bce build + deploy
 ROOT=/home/andre/Develop/apple-bce-fix/apple-bce
 KVER=$(uname -r)
 DST=/lib/modules/$KVER/updates/apple-bce/apple-bce.ko
