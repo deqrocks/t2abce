@@ -16,7 +16,6 @@ static irqreturn_t bce_handle_mb_irq(int irq, void *dev);
 static irqreturn_t bce_handle_dma_irq(int irq, void *dev);
 static int bce_fw_version_handshake(struct apple_bce_device *bce);
 static int bce_register_command_queue(struct apple_bce_device *bce, struct bce_queue_memcfg *cfg, int is_sq);
-static void bce_disable_pcie_low_power_states(struct apple_bce_device *bce);
 static int bce_retrain_pcie_link(struct apple_bce_device *bce);
 static int bce_wait_for_pcie_link_ready(struct apple_bce_device *bce);
 
@@ -49,8 +48,6 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     bce->pci = dev;
     pci_set_drvdata(dev, bce);
-
-    bce_disable_pcie_low_power_states(bce);
 
     bce->devt = bce_chrdev;
     bce->dev = device_create(bce_class, &dev->dev, bce->devt, NULL, "apple-bce");
@@ -356,48 +353,6 @@ finish_with_state:
     return status;
 }
 
-static void bce_disable_aspm_l1_for_dev(struct pci_dev *pdev, const char *name)
-{
-    int cap;
-    int l1ss_cap;
-    u16 lnkctl;
-    u32 l1ss_ctl1;
-
-    if (!pdev)
-        return;
-
-    cap = pci_find_capability(pdev, PCI_CAP_ID_EXP);
-    if (cap) {
-        pci_read_config_word(pdev, cap + PCI_EXP_LNKCTL, &lnkctl);
-        if (lnkctl & PCI_EXP_LNKCTL_ASPMC) {
-            lnkctl &= ~PCI_EXP_LNKCTL_ASPMC;
-            pci_write_config_word(pdev, cap + PCI_EXP_LNKCTL, lnkctl);
-            pr_info("apple-bce: pcie: disabled ASPM L1/L0s on %s (%s)\n", name, pci_name(pdev));
-        }
-    }
-
-    l1ss_cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_L1SS);
-    if (l1ss_cap) {
-        pci_read_config_dword(pdev, l1ss_cap + PCI_L1SS_CTL1, &l1ss_ctl1);
-        if (l1ss_ctl1 & PCI_L1SS_CTL1_L1SS_MASK) {
-            l1ss_ctl1 &= ~PCI_L1SS_CTL1_L1SS_MASK;
-            pci_write_config_dword(pdev, l1ss_cap + PCI_L1SS_CTL1, l1ss_ctl1);
-            pr_info("apple-bce: pcie: disabled L1SS on %s (%s)\n", name, pci_name(pdev));
-        }
-    }
-}
-
-static void bce_disable_pcie_low_power_states(struct apple_bce_device *bce)
-{
-    struct pci_dev *up;
-
-    bce_disable_aspm_l1_for_dev(bce->pci, "endpoint");
-
-    up = pci_upstream_bridge(bce->pci);
-    if (up)
-        bce_disable_aspm_l1_for_dev(up, "upstream");
-}
-
 static int bce_retrain_pcie_link(struct apple_bce_device *bce)
 {
     struct pci_dev *up = pci_upstream_bridge(bce->pci);
@@ -474,8 +429,6 @@ static int apple_bce_resume(struct device *dev)
 {
     struct apple_bce_device *bce = pci_get_drvdata(to_pci_dev(dev));
     int status;
-
-    bce_disable_pcie_low_power_states(bce);
 
     pci_set_master(bce->pci);
     if (bce->pci0)
