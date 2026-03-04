@@ -111,6 +111,7 @@ struct aaudio_device {
 
     struct completion remote_alive;
     struct work_struct resume_work;
+    struct workqueue_struct *timestamp_wq;
     bool alive;
 };
 
